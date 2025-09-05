@@ -15,9 +15,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN not set! Railway me Variables tab me BOT_TOKEN add karo.")
 
+BOT_USERNAME = os.getenv("BOT_USERNAME", "OnlyEducationvideos_bot")  # apna bot username (without @)
+REFRESH_LINK = f"https://t.me/{BOT_USERNAME}?start=refresh"
+
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Admin ka Telegram ID
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))  # Private channel id jahan videos upload hote hain
-ADS_LINK_MAIN = os.getenv("ADS_LINK", "https://example.com")  # Shortlink
 
 TOKEN_HOURS = 24
 TOKEN_SECONDS = TOKEN_HOURS * 60 * 60
@@ -103,7 +105,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
 
-    # User came back from ads
+    # ✅ User came back from ads (deep link ?start=refresh)
     if args and args[0].startswith("refresh"):
         refresh_token(user_id)
         await update.message.reply_text("✅ Token refreshed for 24 hours!", reply_markup=main_menu())
@@ -114,7 +116,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🎉 Welcome back!", reply_markup=main_menu())
         await send_video_with_next(user_id, context)
     else:
-        keyboard = [[InlineKeyboardButton("🔄 Refresh Token", url=ADS_LINK_MAIN)]]
+        keyboard = [[InlineKeyboardButton("🔄 Refresh Token", url=REFRESH_LINK)]]
         await update.message.reply_text(
             "⏳ Your ads token expired.\nWatch ad to refresh (valid 24h), then return to bot.",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -126,7 +128,7 @@ async def next_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     if not has_valid_token(user_id):
-        keyboard = [[InlineKeyboardButton("🔄 Refresh Token", url=ADS_LINK_MAIN)]]
+        keyboard = [[InlineKeyboardButton("🔄 Refresh Token", url=REFRESH_LINK)]]
         await query.edit_message_text(
             "⚠️ Token expired. Refresh to continue.",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -141,7 +143,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if choice in ["English", "Indian", "Desi Mix", "Pakistani"]:
         if not has_valid_token(user_id):
-            keyboard = [[InlineKeyboardButton("🔄 Refresh Token", url=ADS_LINK_MAIN)]]
+            keyboard = [[InlineKeyboardButton("🔄 Refresh Token", url=REFRESH_LINK)]]
             await update.message.reply_text("⚠️ Token expired.", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
