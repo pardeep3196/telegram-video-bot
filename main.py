@@ -11,7 +11,10 @@ from telegram.ext import (
 )
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")          # Render me set karna
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN not set! Railway me Variables tab me BOT_TOKEN add karo.")
+
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Admin ka Telegram ID
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))  # Private channel id jahan videos upload hote hain
 ADS_LINK_MAIN = os.getenv("ADS_LINK", "https://example.com")  # Shortlink
