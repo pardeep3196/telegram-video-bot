@@ -1,4 +1,4 @@
-import os, json, time, random, logging
+import os, json, time, random, logging, asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -12,17 +12,15 @@ from telegram.ext import (
 )
 
 # ===================== CONFIG =====================
-# Railway/Local: env se le lo; defaults diye hue hain taaki locally bhi run ho jaye.
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # <-- Railway me zaroor set karein
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN missing. Railway → Variables me BOT_TOKEN add karo.")
 
-BOT_USERNAME = os.getenv("BOT_USERNAME", "YourBotUsernameWithoutAt")  # without @
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))           # Optional: sirf is ID ko admin upload allow (0 = allow all)
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))       # Optional: agar channel handler chahiye
+BOT_USERNAME = os.getenv("BOT_USERNAME", "YourBotUsernameWithoutAt")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
-# Ads shortlink (Recommended):
-ADS_LINK = os.getenv("ADS_LINK", "")  # agar blank hua to deep-link fallback use hoga
+ADS_LINK = os.getenv("ADS_LINK", "")
 # ==================================================
 
 # ================ TOKEN SETTINGS ==================
@@ -42,9 +40,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
+# Track NEXT clicks
+NEXT_PRESSED = set()
+
 # ----------------- Utils & Storage ----------------
 def ensure_storage():
-    """Create data dir & files if missing."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not TOKENS_FILE.exists():
         TOKENS_FILE.write_text(json.dumps({}, ensure_ascii=False))
@@ -96,7 +96,6 @@ def get_random_video() -> Optional[Dict[str, Any]]:
     vids = db.get("videos", [])
     if not vids:
         return None
-    # Random from all saved (can be biased to latest if you want)
     return random.choice(vids)
 
 # --------------- UI Helpers -----------------------
@@ -107,11 +106,11 @@ def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def refresh_button_url() -> str:
-    """Prefer ADS_LINK; otherwise deep-link back to bot with ?start=refresh."""
     if ADS_LINK.strip():
         return ADS_LINK.strip()
     return f"https://t.me/{BOT_USERNAME}?start=refresh"
 
+# ---------------- Video Sender --------------------
 async def send_video_with_next(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     video = get_random_video()
     if not video:
@@ -125,64 +124,82 @@ async def send_video_with_next(user_id: int, context: ContextTypes.DEFAULT_TYPE)
     caption = f"🎬 {video['title']} • {when}"
     keyboard = [[InlineKeyboardButton("⏭ NEXT", callback_data="next_video")]]
 
-    await context.bot.send_video(
+    # Send video with button
+    sent = await context.bot.send_video(
         chat_id=user_id,
         video=video["file_id"],
         caption=caption,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+    # Timer = duration + 5 min
+    duration = getattr(sent.video, "duration", 0)
+    wait_time = duration + 300 if duration else 600
+
+    async def auto_delete():
+        await asyncio.sleep(wait_time)
+        if user_id not in NEXT_PRESSED:
+            try:
+                await context.bot.delete_message(chat_id=user_id, message_id=sent.message_id)
+
+                # Follow-up message
+                see_more_btn = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("✨ See More Videos ✨", callback_data="next_video")]]
+                )
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "⚡ The video was automatically removed after it finished + 5 minutes.\n\n"
+                        "👉 To keep enjoying more, simply tap below.\n\n"
+                        "Thank you for staying with us 🙏"
+                    ),
+                    reply_markup=see_more_btn
+                )
+            except Exception as e:
+                log.warning(f"Auto-delete failed: {e}")
+
+    asyncio.create_task(auto_delete())
+
 # ------------------- Handlers ---------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_storage()
-
     user = update.effective_user
     user_id = user.id if user else 0
     args = context.args
 
-    log.info("START from %s args=%s", user_id, args)
-
-    # 2) Refresh token via deep-link: /start refresh...
-    if args and len(args) > 0 and args[0].lower().startswith("refresh"):
+    if args and args[0].lower().startswith("refresh"):
         refresh_token(user_id)
-        await update.message.reply_text(
-            "✅ Token refreshed for 24 hours!",
-            reply_markup=main_menu()
-        )
+        await update.message.reply_text("✅ Token refreshed for 24 hours!", reply_markup=main_menu())
         await send_video_with_next(user_id, context)
         return
 
-    # 1) If token valid → send a random video + menu
     if has_valid_token(user_id):
         await update.message.reply_text("🎉 Welcome back!", reply_markup=main_menu())
         await send_video_with_next(user_id, context)
         return
 
-    # If token expired → show Refresh button (shortlink or deep-link)
     btn_url = refresh_button_url()
     await update.message.reply_text(
         "⏳ Your ads token expired.\nWatch the ad to refresh (valid 24h), then return to the bot.",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]]
-        )
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
     )
 
 async def on_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     user_id = query.from_user.id
+    NEXT_PRESSED.add(user_id)  # mark next pressed
 
+    await query.answer()
     if not has_valid_token(user_id):
         btn_url = refresh_button_url()
         await query.edit_message_text(
             "⚠️ Token expired. Refresh to continue.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]]
-            )
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
         )
         return
 
     await send_video_with_next(user_id, context)
+    NEXT_PRESSED.discard(user_id)  # reset after sending new
 
 async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_storage()
@@ -194,56 +211,39 @@ async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
             btn_url = refresh_button_url()
             await update.message.reply_text(
                 "⚠️ Token expired.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]]
-                )
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
             )
             return
 
         await update.message.reply_text(f"🎥 Category selected: {choice}")
         await send_video_with_next(user_id, context)
     else:
-        # Ignore random text / or guide
-        await update.message.reply_text(
-            "Use the menu below or /start.",
-            reply_markup=main_menu()
-        )
+        await update.message.reply_text("Use the menu below or /start.", reply_markup=main_menu())
 
 async def expire_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_storage()
-    user_id = update.effective_user.id
-    expire_token(user_id)
-    await update.message.reply_text(
-        "⛔ Your token has expired. Use /start after watching ads to refresh."
-    )
+    expire_token(update.effective_user.id)
+    await update.message.reply_text("⛔ Your token has expired. Use /start to refresh.")
 
 async def on_channel_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save videos posted in the configured private channel."""
     ensure_storage()
     msg = update.channel_post
     if not msg or not msg.video:
         return
-
     if CHANNEL_ID and msg.chat and msg.chat.id != CHANNEL_ID:
-        # Ignore other channels if CHANNEL_ID is set
         return
-
     title = (msg.caption or "").strip() or f"Video {msg.message_id}"
     add_video(msg.video.file_id, title)
     log.info("Saved channel video: %s", title)
 
 async def on_admin_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin can DM a video to the bot to save it."""
     ensure_storage()
     msg = update.message
     if not msg or not msg.video:
         return
-
-    # If ADMIN_ID is set (>0), restrict; else allow any sender.
     if ADMIN_ID > 0 and update.effective_user.id != ADMIN_ID:
         await msg.reply_text("🚫 Only admin can add videos.")
         return
-
     title = (msg.caption or "").strip() or f"Admin Video {msg.message_id}"
     add_video(msg.video.file_id, title)
     await msg.reply_text(f"✅ Saved video: {title}")
@@ -253,20 +253,11 @@ def main():
     ensure_storage()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("expire", expire_cmd))
-
-    # Buttons
     app.add_handler(CallbackQueryHandler(on_next, pattern=r"^next_video$"))
-
-    # Text (bottom menu)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_category))
-
-    # Channel: auto-save videos
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.VIDEO, on_channel_video))
-
-    # Admin DM: save video
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.VIDEO, on_admin_video))
 
     print("🤖 Bot is running...")
