@@ -34,7 +34,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-# Track last sent message for auto-delete
+# Track active messages for delete
 ACTIVE_MESSAGES: Dict[int, int] = {}  # {user_id: message_id}
 
 # ============== STORAGE HELPERS ==============
@@ -91,7 +91,8 @@ def get_random_video(category: Optional[str] = None) -> Optional[Dict[str, Any]]
     if not vids:
         return None
     if category:
-        vids = [v for v in vids if f"#{category.lower()}" in v["title"].lower()]
+        tag = f"#{category.lower()}"
+        vids = [v for v in vids if tag in v["title"].lower()]
     if not vids:
         return None
     return random.choice(vids)
@@ -103,35 +104,34 @@ def main_menu() -> ReplyKeyboardMarkup:
     rows = [CATEGORIES[:2], CATEGORIES[2:]]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
+def gplinks_shorten(url: str) -> str:
+    """Shorten link using GPLinks API."""
+    if not GPLINKS_API:
+        return url
+    try:
+        api_url = f"https://api.gplinks.com/api?api={GPLINKS_API}&url={url}&format=text"
+        r = requests.get(api_url, timeout=10)
+        if r.status_code == 200 and r.text.strip():
+            return r.text.strip()
+    except Exception as e:
+        log.warning(f"GPLinks shorten failed: {e}")
+    return url
+
 def refresh_button_url() -> str:
-    """Return GPLinks shortened deep-link if API available."""
-    base_url = f"https://t.me/{BOT_USERNAME}?start=refresh"
-
-    if GPLINKS_API:
-        try:
-            api_url = f"https://api.gplinks.com/api?api={GPLINKS_API}&url={base_url}&format=text"
-            r = requests.get(api_url, timeout=10)
-            log.info(f"GPLinks API resp: {r.status_code} {r.text}")
-            if r.status_code == 200 and r.text.strip():
-                return r.text.strip()
-        except Exception as e:
-            log.warning(f"GPLinks shortlink error: {e}")
-
-    return base_url
+    deep_link = f"https://t.me/{BOT_USERNAME}?start=refresh"
+    return gplinks_shorten(deep_link)
 
 def see_more_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("▶️ See More", callback_data="next_video")]])
 
 async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    user_id, msg_id = job.data
-
+    user_id, msg_id = context.job.data
     try:
         await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
-        await context.bot.send_message(
+        await context.bot.send_animation(
             chat_id=user_id,
-            text="⏳ This video was auto-deleted after expiry.\n"
-                 "👉 To continue watching, click below.",
+            animation="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExaWN6YWd3MzZxYnhjYnQ0cnhhZDhjeThjNjVkOG51dnRkYTZtN21nMiZlcD12MV9naWZzX3NlYXJjaCZjdD1n/C21GGDOpKT6Z4VuXyn/giphy.gif",
+            caption="⏳ This video was auto-deleted after 5 minutes of inactivity.\n👉 Tap below to watch more.",
             reply_markup=see_more_kb()
         )
     except Exception as e:
@@ -141,10 +141,7 @@ async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
 async def send_video_with_next(user_id: int, context: ContextTypes.DEFAULT_TYPE, category: Optional[str] = None):
     video = get_random_video(category)
     if not video:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="📭 No videos available yet. Ask admin to add some."
-        )
+        await context.bot.send_message(chat_id=user_id, text="📭 No videos available yet.")
         return
 
     if user_id in ACTIVE_MESSAGES:
@@ -165,6 +162,8 @@ async def send_video_with_next(user_id: int, context: ContextTypes.DEFAULT_TYPE,
     )
 
     ACTIVE_MESSAGES[user_id] = msg.message_id
+
+    # schedule delete (duration + 5 min)
     duration = video.get("duration", 0) or 0
     delete_after = (duration + 300) if duration > 0 else 600
     context.job_queue.run_once(
@@ -180,7 +179,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
 
-    if args and len(args) > 0 and args[0].lower().startswith("refresh"):
+    log.info(f"/start by {user_id}, args={args}")
+
+    # only refresh if explicit refresh param
+    if args and len(args) > 0 and args[0].strip().lower() == "refresh":
         refresh_token(user_id)
         await update.message.reply_text("✅ Token refreshed for 24 hours!", reply_markup=main_menu())
         await send_video_with_next(user_id, context)
@@ -193,7 +195,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     btn_url = refresh_button_url()
     await update.message.reply_text(
-        "⏳ Your ads token expired.\nWatch the ad to refresh (valid 24h), then return to the bot.",
+        "⏳ Your token expired.\nWatch the ad to refresh (valid 24h), then return to the bot.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
     )
 
@@ -201,7 +203,6 @@ async def on_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-
     if not has_valid_token(user_id):
         btn_url = refresh_button_url()
         await query.edit_message_text(
@@ -209,14 +210,12 @@ async def on_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
         )
         return
-
     await send_video_with_next(user_id, context)
 
 async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_storage()
     user_id = update.effective_user.id
     choice = (update.message.text or "").strip()
-
     if choice in CATEGORIES:
         if not has_valid_token(user_id):
             btn_url = refresh_button_url()
@@ -264,14 +263,12 @@ async def on_admin_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     ensure_storage()
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("expire", expire_cmd))
     app.add_handler(CallbackQueryHandler(on_next, pattern=r"^next_video$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_category))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL & filters.VIDEO, on_channel_video))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.VIDEO, on_admin_video))
-
     print("🤖 Bot is running...")
     app.run_polling()
 
