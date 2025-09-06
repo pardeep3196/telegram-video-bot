@@ -1,5 +1,5 @@
-import os, json, time, random, logging
-from datetime import datetime, timedelta
+import os, json, time, random, logging, requests
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -19,7 +19,9 @@ if not BOT_TOKEN:
 BOT_USERNAME = os.getenv("BOT_USERNAME", "EagleEyeSignals_bot")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
-ADS_LINK = os.getenv("ADS_LINK", "")
+
+# GPLinks API Token
+GPLINKS_API = os.getenv("GPLINKS_API", "")
 
 TOKEN_HOURS = 24
 TOKEN_SECONDS = TOKEN_HOURS * 60 * 60
@@ -35,7 +37,7 @@ logging.basicConfig(
 log = logging.getLogger("bot")
 
 # Track last sent message for auto-delete
-ACTIVE_MESSAGES: Dict[int, int] = {}  # {user_id: message_id}
+ACTIVE_MESSAGES: Dict[int, int] = {}
 
 # ============== STORAGE HELPERS ==============
 def ensure_storage():
@@ -103,10 +105,21 @@ def main_menu() -> ReplyKeyboardMarkup:
     rows = [CATEGORIES[:2], CATEGORIES[2:]]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
+def make_gplink(url: str) -> str:
+    if not GPLINKS_API:
+        return url
+    try:
+        api_url = f"https://api.gplinks.com/api?api={GPLINKS_API}&url={url}&format=text"
+        r = requests.get(api_url, timeout=10)
+        if r.status_code == 200 and r.text.strip():
+            return r.text.strip()
+    except Exception as e:
+        log.warning(f"GPLinks failed: {e}")
+    return url
+
 def refresh_button_url() -> str:
-    if ADS_LINK.strip():
-        return ADS_LINK.strip()
-    return f"https://t.me/{BOT_USERNAME}?start=refresh"
+    target = f"https://t.me/{BOT_USERNAME}?start=refresh"
+    return make_gplink(target)
 
 def see_more_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("▶️ See More", callback_data="next_video")]])
@@ -117,10 +130,10 @@ async def auto_delete_message(context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.delete_message(chat_id=user_id, message_id=msg_id)
-        await context.bot.send_message(
+        await context.bot.send_animation(
             chat_id=user_id,
-            text="⏳ This video was automatically deleted after expiry.\n"
-                 "👉 To continue watching, click below.",
+            animation="https://media.giphy.com/media/j5QcmXoFWl4Q0/giphy.gif",  # Example GIF
+            caption="⏳ This video was auto-deleted after expiry.\n\n👉 To continue watching, click below.",
             reply_markup=see_more_kb()
         )
     except Exception as e:
@@ -136,7 +149,6 @@ async def send_video_with_next(user_id: int, context: ContextTypes.DEFAULT_TYPE,
         )
         return
 
-    # delete old active video
     if user_id in ACTIVE_MESSAGES:
         try:
             await context.bot.delete_message(chat_id=user_id, message_id=ACTIVE_MESSAGES[user_id])
@@ -154,12 +166,10 @@ async def send_video_with_next(user_id: int, context: ContextTypes.DEFAULT_TYPE,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-    # Save active message
     ACTIVE_MESSAGES[user_id] = msg.message_id
 
-    # Schedule auto-delete
     duration = video.get("duration", 0) or 0
-    delete_after = (duration + 300) if duration > 0 else 600  # +5 min buffer
+    delete_after = (duration + 300) if duration > 0 else 600
     context.job_queue.run_once(
         auto_delete_message,
         when=delete_after,
@@ -186,7 +196,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     btn_url = refresh_button_url()
     await update.message.reply_text(
-        "⏳ Your ads token expired.\nWatch the ad to refresh (valid 24h), then return to the bot.",
+        "⏳ Your token expired.\nTap below, watch the ad, then return to bot.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
     )
 
