@@ -123,7 +123,8 @@ async def gplinks_shorten(long_url: str) -> str:
 async def refresh_button_url() -> str:
     if ADS_LINK.strip():
         return ADS_LINK.strip()
-    deep = f"https://t.me/{BOT_USERNAME}?start=refresh"
+    # add random query param to make every link unique
+    deep = f"https://t.me/{BOT_USERNAME}?start=refresh&v={random.randint(1000,999999)}"
     return await gplinks_shorten(deep)
 
 
@@ -210,7 +211,7 @@ async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not has_valid_token(user_id):
             btn_url = await refresh_button_url()
             await update.message.reply_text(
-                "⚠️ Token expired.",
+                "⚠️ Your token expired.",
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]]
                 )
