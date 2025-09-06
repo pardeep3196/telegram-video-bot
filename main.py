@@ -1,4 +1,4 @@
-import os, json, time, random, logging, asyncio
+import os, json, time, random, logging, aiohttp
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -16,11 +16,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN missing. Railway → Variables me BOT_TOKEN add karo.")
 
-BOT_USERNAME = os.getenv("BOT_USERNAME", "YourBotUsernameWithoutAt")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "EagleEyeSignals_bot")  # without @
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
-ADS_LINK = os.getenv("ADS_LINK", "")
+ADS_LINK = os.getenv("ADS_LINK", "")  # agar diya hoga to wahi use hoga
+GPLINKS_API_KEY = os.getenv("GPLINKS_API_KEY", "").strip()
 # ==================================================
 
 # ================ TOKEN SETTINGS ==================
@@ -40,8 +41,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("bot")
 
-# Track NEXT clicks
-NEXT_PRESSED = set()
 
 # ----------------- Utils & Storage ----------------
 def ensure_storage():
@@ -61,6 +60,7 @@ def write_json(path: Path, data: Any):
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False))
     tmp.replace(path)
+
 
 # ----------------- Token System -------------------
 def _now() -> int:
@@ -82,6 +82,7 @@ def expire_token(user_id: int):
         del db[str(user_id)]
         write_json(TOKENS_FILE, db)
 
+
 # --------------- Video Storage --------------------
 def add_video(file_id: str, title: str):
     db = read_json(VIDEOS_FILE, {"videos": []})
@@ -98,6 +99,34 @@ def get_random_video() -> Optional[Dict[str, Any]]:
         return None
     return random.choice(vids)
 
+
+# --------------- GPLinks Integration --------------
+async def gplinks_shorten(long_url: str) -> str:
+    if not GPLINKS_API_KEY:
+        return long_url
+    api = "https://api.gplinks.com/api"
+    params = {
+        "api": GPLINKS_API_KEY,
+        "url": long_url,
+        "format": "text"
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(api, params=params, timeout=20) as r:
+                if r.status == 200:
+                    txt = (await r.text()).strip()
+                    return txt or long_url
+    except Exception as e:
+        log.warning(f"GPLinks shorten failed: {e}")
+    return long_url
+
+async def refresh_button_url() -> str:
+    if ADS_LINK.strip():
+        return ADS_LINK.strip()
+    deep = f"https://t.me/{BOT_USERNAME}?start=refresh"
+    return await gplinks_shorten(deep)
+
+
 # --------------- UI Helpers -----------------------
 CATEGORIES = ["English", "Indian", "Desi Mix", "Pakistani"]
 
@@ -105,12 +134,6 @@ def main_menu() -> ReplyKeyboardMarkup:
     rows = [CATEGORIES[:2], CATEGORIES[2:]]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
-def refresh_button_url() -> str:
-    if ADS_LINK.strip():
-        return ADS_LINK.strip()
-    return f"https://t.me/{BOT_USERNAME}?start=refresh"
-
-# ---------------- Video Sender --------------------
 async def send_video_with_next(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     video = get_random_video()
     if not video:
@@ -124,41 +147,13 @@ async def send_video_with_next(user_id: int, context: ContextTypes.DEFAULT_TYPE)
     caption = f"🎬 {video['title']} • {when}"
     keyboard = [[InlineKeyboardButton("⏭ NEXT", callback_data="next_video")]]
 
-    # Send video with button
-    sent = await context.bot.send_video(
+    await context.bot.send_video(
         chat_id=user_id,
         video=video["file_id"],
         caption=caption,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-    # Timer = duration + 5 min
-    duration = getattr(sent.video, "duration", 0)
-    wait_time = duration + 300 if duration else 600
-
-    async def auto_delete():
-        await asyncio.sleep(wait_time)
-        if user_id not in NEXT_PRESSED:
-            try:
-                await context.bot.delete_message(chat_id=user_id, message_id=sent.message_id)
-
-                # Follow-up message
-                see_more_btn = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("✨ See More Videos ✨", callback_data="next_video")]]
-                )
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        "⚡ The video was automatically removed after it finished + 5 minutes.\n\n"
-                        "👉 To keep enjoying more, simply tap below.\n\n"
-                        "Thank you for staying with us 🙏"
-                    ),
-                    reply_markup=see_more_btn
-                )
-            except Exception as e:
-                log.warning(f"Auto-delete failed: {e}")
-
-    asyncio.create_task(auto_delete())
 
 # ------------------- Handlers ---------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,9 +162,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else 0
     args = context.args
 
-    if args and args[0].lower().startswith("refresh"):
+    if args and len(args) > 0 and args[0].lower().startswith("refresh"):
         refresh_token(user_id)
-        await update.message.reply_text("✅ Token refreshed for 24 hours!", reply_markup=main_menu())
+        await update.message.reply_text(
+            "✅ Token refreshed for 24 hours!",
+            reply_markup=main_menu()
+        )
         await send_video_with_next(user_id, context)
         return
 
@@ -178,28 +176,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_video_with_next(user_id, context)
         return
 
-    btn_url = refresh_button_url()
+    btn_url = await refresh_button_url()
     await update.message.reply_text(
         "⏳ Your ads token expired.\nWatch the ad to refresh (valid 24h), then return to the bot.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]]
+        )
     )
 
 async def on_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    user_id = query.from_user.id
-    NEXT_PRESSED.add(user_id)  # mark next pressed
-
     await query.answer()
+    user_id = query.from_user.id
+
     if not has_valid_token(user_id):
-        btn_url = refresh_button_url()
+        btn_url = await refresh_button_url()
         await query.edit_message_text(
             "⚠️ Token expired. Refresh to continue.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]]
+            )
         )
         return
 
     await send_video_with_next(user_id, context)
-    NEXT_PRESSED.discard(user_id)  # reset after sending new
 
 async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_storage()
@@ -208,30 +208,40 @@ async def on_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if choice in CATEGORIES:
         if not has_valid_token(user_id):
-            btn_url = refresh_button_url()
+            btn_url = await refresh_button_url()
             await update.message.reply_text(
                 "⚠️ Token expired.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]])
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔄 Refresh Token", url=btn_url)]]
+                )
             )
             return
 
         await update.message.reply_text(f"🎥 Category selected: {choice}")
         await send_video_with_next(user_id, context)
     else:
-        await update.message.reply_text("Use the menu below or /start.", reply_markup=main_menu())
+        await update.message.reply_text(
+            "Use the menu below or /start.",
+            reply_markup=main_menu()
+        )
 
 async def expire_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_storage()
-    expire_token(update.effective_user.id)
-    await update.message.reply_text("⛔ Your token has expired. Use /start to refresh.")
+    user_id = update.effective_user.id
+    expire_token(user_id)
+    await update.message.reply_text(
+        "⛔ Your token has expired. Use /start after watching ads to refresh."
+    )
 
 async def on_channel_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_storage()
     msg = update.channel_post
     if not msg or not msg.video:
         return
+
     if CHANNEL_ID and msg.chat and msg.chat.id != CHANNEL_ID:
         return
+
     title = (msg.caption or "").strip() or f"Video {msg.message_id}"
     add_video(msg.video.file_id, title)
     log.info("Saved channel video: %s", title)
@@ -241,12 +251,15 @@ async def on_admin_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.video:
         return
+
     if ADMIN_ID > 0 and update.effective_user.id != ADMIN_ID:
         await msg.reply_text("🚫 Only admin can add videos.")
         return
+
     title = (msg.caption or "").strip() or f"Admin Video {msg.message_id}"
     add_video(msg.video.file_id, title)
     await msg.reply_text(f"✅ Saved video: {title}")
+
 
 # ------------------- Main ------------------------
 def main():
@@ -262,6 +275,7 @@ def main():
 
     print("🤖 Bot is running...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
